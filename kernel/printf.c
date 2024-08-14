@@ -117,6 +117,7 @@ printf(char *fmt, ...)
 void
 panic(char *s)
 {
+  backtrace(); // 添加调用栈回溯
   pr.locking = 0;
   printf("panic: ");
   printf(s);
@@ -131,4 +132,21 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
   pr.locking = 1;
+}
+
+void 
+backtrace(void) {
+    uint64 fp = r_fp(); // 获取当前帧指针
+
+    printf("backtrace:\n");
+
+    while (fp != 0) {
+        uint64 ra = *(uint64 *)(fp - 8);  // 返回地址
+        printf("%p\n", ra);
+
+        fp = *(uint64 *)(fp - 16);  // 上一个栈帧的帧指针
+        if (fp < PGROUNDDOWN(fp) || fp >= PGROUNDUP(fp)) {
+            break; // 遇到栈顶或栈底，停止遍历
+        }
+    }
 }
