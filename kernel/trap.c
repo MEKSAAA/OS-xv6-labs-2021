@@ -8,6 +8,9 @@
 
 struct spinlock tickslock;
 uint ticks;
+int cowhandler(pte_t *pte, uint64 va);
+pte_t* walk(pagetable_t pagetable, uint64 va, int alloc);
+
 
 extern char trampoline[], uservec[], userret[];
 
@@ -29,6 +32,7 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -46,10 +50,10 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
+
   if(r_scause() == 8){
     // system call
 
@@ -65,6 +69,19 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15){
+    // Store/AMO page fault(write page fault)
+    // see Volume II: RISC-V Privileged Architectures V20211203 Page 71
+
+    // the faulting virtual address
+    // see Volume II: RISC-V Privileged Architectures V20211203 Page 70
+    // the download url is https://github.com/riscv/riscv-isa-manual/releases/download/Priv-v1.12/riscv-privileged-20211203.pdf
+    uint64 va = r_stval();
+    if (va >= p->sz)
+      p->killed = 1;
+    int ret = cowhandler(p->pagetable, va);
+    if (ret != 0)
+      p->killed = 1;
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -108,7 +125,7 @@ usertrapret(void)
 
   // set up the registers that trampoline.S's sret will use
   // to get to user space.
-  
+
   // set S Previous Privilege mode to User.
   unsigned long x = r_sstatus();
   x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
@@ -121,7 +138,7 @@ usertrapret(void)
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
 
-  // jump to trampoline.S at the top of memory, which 
+  // jump to trampoline.S at the top of memory, which
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
   uint64 fn = TRAMPOLINE + (userret - trampoline);
@@ -130,14 +147,14 @@ usertrapret(void)
 
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
-void 
+void
 kerneltrap()
 {
   int which_dev = 0;
   uint64 sepc = r_sepc();
   uint64 sstatus = r_sstatus();
   uint64 scause = r_scause();
-  
+
   if((sstatus & SSTATUS_SPP) == 0)
     panic("kerneltrap: not from supervisor mode");
   if(intr_get() != 0)
@@ -207,7 +224,7 @@ devintr()
     if(cpuid() == 0){
       clockintr();
     }
-    
+
     // acknowledge the software interrupt by clearing
     // the SSIP bit in sip.
     w_sip(r_sip() & ~2);
@@ -218,3 +235,33 @@ devintr()
   }
 }
 
+int
+cowhandler(pagetable_t pagetable, uint64 va)
+{
+    char *mem;
+    if (va >= MAXVA)
+      return -1;
+    pte_t *pte = walk(pagetable, va, 0);
+    if (pte == 0)
+      return -1;
+    // check the PTE
+    if ((*pte & PTE_RSW) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_V) == 0) {
+      return -1;
+    }
+    if ((mem = kalloc()) == 0) {
+      return -1;
+    }
+    // old physical address
+    uint64 pa = PTE2PA(*pte);
+    // copy old data to new mem
+    memmove((char*)mem, (char*)pa, PGSIZE);
+    // PAY ATTENTION
+    // decrease the reference count of old memory page, because a new page has been allocated
+    kfree((void*)pa);
+    uint flags = PTE_FLAGS(*pte);
+    // set PTE_W to 1, change the address pointed to by PTE to new memory page(mem)
+    *pte = (PA2PTE(mem) | flags | PTE_W);
+    // set PTE_RSW to 0
+    *pte &= ~PTE_RSW;
+    return 0;
+}
