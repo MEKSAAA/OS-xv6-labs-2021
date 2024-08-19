@@ -322,6 +322,34 @@ sys_open(void)
     return -1;
   }
 
+  // 判断是否为符号链接且并不打开符号链接文件本身——最多链接十层，防止循环链接
+  int layer=0;
+  while(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    layer++;
+    if(layer==10){
+      // 很可能是循环链接
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+    else{
+      // 读取 inode
+      if(readi(ip, 0, (uint64)path, 0, MAXPATH) < MAXPATH) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      iunlockput(ip);
+      // 文件名匹配inode
+      ip = namei(path);
+      if(ip==0){
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+    }
+  }
+
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -482,5 +510,37 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+// 符号链接
+uint64
+sys_symlink(void){
+  char path[MAXPATH];
+  char target[MAXPATH];
+
+  if(argstr(0, target, MAXPATH)<0){
+    return -1;
+  }
+  if(argstr(1, path, MAXPATH)<0){
+    return -1;
+  }
+
+  begin_op();
+  // 为此符号链接新建 inode
+  struct inode *sym_ip=create(path,T_SYMLINK,0,0);
+  if(sym_ip==0){
+    end_op();
+    return -1;
+  }
+
+  // 写入被链接的文件
+  if(writei(sym_ip,0,(uint64)target,0,MAXPATH)<MAXPATH){
+    iunlockput(sym_ip);
+    end_op();
+    return -1;
+  }
+  iunlockput(sym_ip);
+  end_op();
   return 0;
 }
