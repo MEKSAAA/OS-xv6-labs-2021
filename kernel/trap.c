@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,7 +71,57 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  }
+   else if( r_scause() == 13 || r_scause() == 15 ){
+    uint64 va = r_stval();
+    // 判断虚拟地址合法性，非法直接杀死进程
+    // 注意进程堆栈从高向低生长，因此判定是否重合，应把va向上取，堆栈指针向下取
+    if(va >= p->sz || va > MAXVA || PGROUNDUP(va) == PGROUNDDOWN(p->trapframe->sp)) {
+      p->killed = 1;
+    }
+    // 读取进程中该内存地址对应的vma 
+    struct vma *vma = 0;
+    for (int i = 0; i < VMASIZE; i++) {
+      if (p->vma[i].valid == 1 && va >= p->vma[i].addr && va < p->vma[i].addr + p->vma[i].length) {
+        vma = &p->vma[i];
+        break;
+      }
+    }
+    // 分配内存空间，将对应物理地址数据读入
+    if(vma) {
+      va = PGROUNDDOWN(va);
+      uint64 offset = va - vma->addr;
+      uint64 mem = (uint64)kalloc();
+
+      if(mem == 0) {
+        p->killed = 1;
+      } else {
+        memset((void*)mem, 0, PGSIZE);
+        // 读取数据
+        ilock(vma->f->ip);
+        readi(vma->f->ip, 0, mem, offset, PGSIZE);
+        iunlock(vma->f->ip);
+        // 设置标志位
+        int flag = PTE_U;
+        if(vma->prot & PROT_READ){
+          flag |= PTE_R;
+        }
+        if(vma->prot & PROT_WRITE){
+          flag |= PTE_W;
+        }
+        if(vma->prot & PROT_EXEC){
+          flag |= PTE_X;
+        }
+        // 建立页表映射(创建PTE)
+        if(mappages(p->pagetable, va, PGSIZE, mem, flag) != 0) {
+          kfree((void*)mem);
+          p->killed = 1;
+        }
+      }
+   }
+  }
+  
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

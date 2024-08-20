@@ -484,3 +484,85 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void){
+  struct file *f;
+  int prot,flags,fd,offset; //文件相关参数
+
+  uint64 addr; // 相应内存部分起始地址
+  int length;  // 映射字节数
+
+  if(argaddr(0, &addr) || argint(1, &length) || argint(2, &prot) ||
+    argint(3, &flags) || argfd(4, &fd, &f) || argint(5, &offset)) {
+    return -1;
+  }
+  if(!(f->writable) && (prot & PROT_WRITE) && flags == MAP_SHARED){
+    // 若须写回 但写权限冲突
+    return -1;
+  }
+  struct proc *p=myproc();
+  length = PGROUNDUP(length); //使用堆高位地址，因为其是从低到高生长的
+  if(p->sz > MAXVA - length){
+    return -1;
+  }
+
+  // 遍历vma数组，寻找未使用区域映射文件
+  for(int i = 0; i < VMASIZE; i++) {
+    if(p->vma[i].valid == 0) {
+      p->vma[i].valid = 1;
+      p->vma[i].addr = p->sz;
+      p->vma[i].length = length;
+      p->vma[i].f = f;
+      p->vma[i].prot = prot;
+      p->vma[i].flags = flags;
+      p->vma[i].fd = fd;
+      p->vma[i].offset = offset;
+      filedup(f); // 添加引用
+      p->sz += length;
+      return p->vma[i].addr;
+    }
+  }
+  return -1;
+}
+
+uint64
+sys_munmap(void){
+  uint64 addr;
+  int length;
+  if(argaddr(0, &addr) || argint(1, &length)){
+    return -1;
+  }
+  // 地址空间从低向高生长，优先使用了高位
+  addr = PGROUNDDOWN(addr); 
+  length = PGROUNDUP(length);
+  struct proc *p = myproc();
+  struct vma *vma = 0;
+  // 查找满足地址范围的vma
+  for(int i = 0; i < VMASIZE; i++) {
+    if (addr >= p->vma[i].addr || addr < p->vma[i].addr + p->vma[i].length) {
+      vma = &p->vma[i];
+      break;
+    }
+  }
+    // 若未找到则直接返回
+    if(vma == 0){
+      return 0;
+    } 
+    // 由实验要求，只需要取消地址与传入地址相同的文件的映射即可
+    if(vma->addr == addr) {
+      vma->addr += length; 
+      vma->length -= length;
+      // 若需要写回则先将脏页内容写回文件
+      if(vma->flags & MAP_SHARED){
+        filewrite(vma->f, addr, length);
+      }
+      // 取消页表映射
+      uvmunmap(p->pagetable, addr, length/PGSIZE, 1);
+      if(vma->length == 0) {
+        fileclose(vma->f);
+        vma->valid = 0;
+      }
+    }
+  return 0;
+}

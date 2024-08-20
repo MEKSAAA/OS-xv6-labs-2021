@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -313,6 +314,15 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+
+  // 复制父进程的文件映射
+  for(int i = 0; i < VMASIZE; i++) {
+    if(p->vma[i].valid){
+      memmove(&(np->vma[i]), &(p->vma[i]), sizeof(p->vma[i]));
+      filedup(p->vma[i].f);
+    }
+  }
+
   release(&np->lock);
 
   return pid;
@@ -350,6 +360,17 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // 删除文件映射
+  for(int i = 0; i < VMASIZE; i++) {
+    if(p->vma[i].valid) {
+      if(p->vma[i].flags & MAP_SHARED)
+        filewrite(p->vma[i].f, p->vma[i].addr, p->vma[i].length);
+      fileclose(p->vma[i].f);
+      uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].length/PGSIZE, 1);
+      p->vma[i].valid = 0;
     }
   }
 
